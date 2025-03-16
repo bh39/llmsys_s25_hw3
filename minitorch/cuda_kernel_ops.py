@@ -411,7 +411,6 @@ class CudaKernelOps(TensorOps):
         rows = batch_size * nhead * from_len
         softmax_len = to_len
     
-        # Define function signature using ctypes
         lib_softmax.launch_attn_softmax_bw.argtypes = [
             np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
             np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
@@ -422,7 +421,6 @@ class CudaKernelOps(TensorOps):
         
         lib_softmax.launch_attn_softmax_bw.restype = None
         
-        # Call the CUDA kernel
         lib_softmax.launch_attn_softmax_bw(
             out_grad._tensor._storage,
             soft_inp._tensor._storage,
@@ -440,49 +438,89 @@ class CudaKernelOps(TensorOps):
         bsz_sqz, hidden_dim = inp.shape
         
         stream = torch.cuda.current_stream().cuda_stream
-    
-        # Create output tensor with same shape as input
+        
         output = inp.zeros(inp.shape)
         
-        # Create tensors for variance and mean (per batch element)
         vars = inp.zeros((bsz_sqz,))
         means = inp.zeros((bsz_sqz,))
         
-        # Define function signature using ctypes
         lib_layernorm.launch_layernorm.argtypes = [
-            ctypes.POINTER(ctypes.c_float),  # ln_res
-            ctypes.POINTER(ctypes.c_float),  # vars
-            ctypes.POINTER(ctypes.c_float),  # means
-            ctypes.POINTER(ctypes.c_float),  # inp
-            ctypes.POINTER(ctypes.c_float),  # scale
-            ctypes.POINTER(ctypes.c_float),  # bias
-            ctypes.c_int,                    # batch_size
-            ctypes.c_int,                    # hidden_dim
-            ctypes.c_void_p                  # stream
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            ctypes.c_int,                    
+            ctypes.c_int,                    
+            ctypes.c_void_p                  
         ]
         
         lib_layernorm.launch_layernorm.restype = None
         
-        # Call the CUDA kernel
         lib_layernorm.launch_layernorm(
-            output._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            vars._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            means._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            inp._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            gamma._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            beta._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            output._tensor._storage,
+            vars._tensor._storage,
+            means._tensor._storage,
+            inp._tensor._storage,
+            gamma._tensor._storage,
+            beta._tensor._storage,
             bsz_sqz,
             hidden_dim,
             stream
         )
         
-        # Return the normalized output
-        return output
+        return output, means, vars
       #   END ASSIGN3_2
       
     @staticmethod
     def layernorm_bw(out_grad: Tensor, inp: Tensor, gamma: Tensor, beta: Tensor, var: Tensor, mean: Tensor):
       #   BEGIN ASSIGN3_2
-      raise("Not implemented")
+        bsz_sqz, hidden_dim = inp.shape
+    
+        inp_grad = inp.zeros(inp.shape)
+        gamma_grad = gamma.zeros(gamma.shape)
+        beta_grad = beta.zeros(beta.shape)
+        
+
+        stream_1 = torch.cuda.Stream().cuda_stream
+        stream_2 = torch.cuda.Stream().cuda_stream
+    
+        lib_layernorm.launch_layernorm_bw.argtypes = [
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  
+            ctypes.c_int,                                                          
+            ctypes.c_int,                                                          
+            ctypes.c_void_p,                                                       
+            ctypes.c_void_p                                                        
+        ]
+        
+        lib_layernorm.launch_layernorm_bw.restype = None
+        
+        lib_layernorm.launch_layernorm_bw(
+            gamma_grad._tensor._storage,
+            beta_grad._tensor._storage,
+            inp_grad._tensor._storage,
+            out_grad._tensor._storage,
+            inp._tensor._storage,
+            gamma._tensor._storage,
+            beta._tensor._storage,
+            var._tensor._storage,
+            mean._tensor._storage,
+            bsz_sqz,
+            hidden_dim,
+            stream_1,
+            stream_2
+        )
+        torch.cuda.current_stream().synchronize()
+        
+        return inp_grad, gamma_grad, beta_grad
       #   END ASSIGN3_2
       
