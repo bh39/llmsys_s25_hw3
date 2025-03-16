@@ -437,7 +437,47 @@ class CudaKernelOps(TensorOps):
     @staticmethod
     def layernorm_fw(inp: Tensor, gamma: Tensor, beta: Tensor):
       #   BEGIN ASSIGN3_2
-      raise("Not implemented")
+        bsz_sqz, hidden_dim = inp.shape
+        
+        stream = torch.cuda.current_stream().cuda_stream
+    
+        # Create output tensor with same shape as input
+        output = inp.zeros(inp.shape)
+        
+        # Create tensors for variance and mean (per batch element)
+        vars = inp.zeros((bsz_sqz,))
+        means = inp.zeros((bsz_sqz,))
+        
+        # Define function signature using ctypes
+        lib_layernorm.launch_layernorm.argtypes = [
+            ctypes.POINTER(ctypes.c_float),  # ln_res
+            ctypes.POINTER(ctypes.c_float),  # vars
+            ctypes.POINTER(ctypes.c_float),  # means
+            ctypes.POINTER(ctypes.c_float),  # inp
+            ctypes.POINTER(ctypes.c_float),  # scale
+            ctypes.POINTER(ctypes.c_float),  # bias
+            ctypes.c_int,                    # batch_size
+            ctypes.c_int,                    # hidden_dim
+            ctypes.c_void_p                  # stream
+        ]
+        
+        lib_layernorm.launch_layernorm.restype = None
+        
+        # Call the CUDA kernel
+        lib_layernorm.launch_layernorm(
+            output._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            vars._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            means._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            inp._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            gamma._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            beta._tensor._storage.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            bsz_sqz,
+            hidden_dim,
+            stream
+        )
+        
+        # Return the normalized output
+        return output
       #   END ASSIGN3_2
       
     @staticmethod
