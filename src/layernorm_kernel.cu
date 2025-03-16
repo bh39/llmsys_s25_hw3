@@ -44,19 +44,55 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   // 2. Compute reduce sum with blockReduce and add epsilon with LN_EPSILON
   // 3. Compute layernorm result with reinterpret_cast by casting to float4 for speedup
   
-  // Step 1
+  // Step 1: Compute sums of x and x^2
   float l_sum = 0;
+  float l_square_sum = 0;
   const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_size;  
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val = inp_f4[idx];
     l_sum += val.x + val.y + val.z + val.w;
+    l_square_sum += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
   }
 
-  // Step 2
-
-  // Step 3
+  // Step 2: reduction and compute statistics
+  blockReduce<ReduceType::kSum, 1>(&l_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_square_sum);
   
-  assert(false && "Not Implemented");
+  __shared__ float s_mean, s_variance;
+  if (threadIdx.x == 0) {
+    s_mean = l_sum / (hidden_size * 4);
+    s_variance = l_square_sum / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
+    
+    // Store mean and variance
+    vars[blockIdx.x] = s_variance;
+    if (means != nullptr) {
+      means[blockIdx.x] = s_mean;
+    }
+  }
+  __syncthreads();
+  
+  // inverse standard deviation for normalization
+  float inv_std = rsqrtf(s_variance);
+  
+  // Step 3: get normalized result
+  float4 *output_f4 = reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
+  const float4 *scale_f4 = reinterpret_cast<const float4 *>(scale);
+  const float4 *bias_f4 = reinterpret_cast<const float4 *>(bias);
+  
+  for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float4 val = inp_f4[idx];
+    float4 scale_val = scale_f4[idx];
+    float4 bias_val = bias_f4[idx];
+    
+    float4 result;
+    // normalization: 
+    result.x = scale_val.x * ((val.x - s_mean) * inv_std) + bias_val.x;
+    result.y = scale_val.y * ((val.y - s_mean) * inv_std) + bias_val.y;
+    result.z = scale_val.z * ((val.z - s_mean) * inv_std) + bias_val.z;
+    result.w = scale_val.w * ((val.w - s_mean) * inv_std) + bias_val.w;
+    
+    output_f4[idx] = result;
+  }
   /// END ASSIGN3_2
 }
 
