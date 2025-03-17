@@ -102,7 +102,7 @@ def collate_batch(
     where the pad_ids makes the length of input_ids to be model_max_length.
 
     ["labels"]: the next tokens to be predicted, which will be used in the cross-entropy
-    loss function, e.g., for an example tokenized as [a, b, c, d], "input_ids" and "labels" 
+    loss function, e.g., for an example tokenized as [a, b, c, d], "input_ids" and "labels"
     can be [a, b, c] and [b, c, d], respectively.
 
     ["label_token_weights"] The 'label_token_weights' are used to differentiate
@@ -139,7 +139,7 @@ def collate_batch(
     input_ids = minitorch.tensor_from_numpy(input_ids, backend=backend)
     labels    = minitorch.tensor_from_numpy(labels, backend=backend)
     label_token_weights = minitorch.tensor_from_numpy(label_token_weights, backend=backend)
-    
+
     # input_ids = token_ids[:, :-1].tolist()
     # labels    = token_ids[:, 1:].tolist()
     # label_token_weights = tgt_token_mask[:, 1:].tolist()
@@ -305,7 +305,7 @@ def generate(model,
             batch_size, seq_len, vocab_size = logits.shape
             logits_next_token = np.array([logits[0, seq_len - 1, i] for i in range(vocab_size)])
             gen_id = np.argmax(logits_next_token)
-            
+
             # END ASSIGN2_2
 
             if gen_id == tokenizer.vocab[f'<eos_{tgt_key}>']:
@@ -406,6 +406,8 @@ def main(dataset_name='bbaaaa/iwslt14-de-en-preprocess',
     for epoch_idx in range(n_epochs):
         desc = f'epoch {epoch_idx} / {n_epochs}'
 
+        time_start = time.time()
+
         train(
             model=model,
             optimizer=optimizer,
@@ -415,6 +417,10 @@ def main(dataset_name='bbaaaa/iwslt14-de-en-preprocess',
             collate_fn=collate_fn,
             desc=desc)
 
+        time_end = time.time()
+        time_training = time_end - time_start
+        print(f"Time in training: {time_training}")
+
         validation_loss = evaluate_loss(
             model=model,
             examples=dataset['validation'],
@@ -423,6 +429,7 @@ def main(dataset_name='bbaaaa/iwslt14-de-en-preprocess',
             desc=desc)
 
         print(f'Epoch {epoch_idx}: Validation Loss = {validation_loss}')
+
 
         gen_sents = generate(
             model=model,
