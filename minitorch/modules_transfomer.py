@@ -14,13 +14,19 @@ from .nn import (
     dropout,
     GELU,
 )
+
+from .tensor_functions import (
+    Attn_Softmax,
+    LayerNorm,
+)
+
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 datatype = np.float32
 
 
 class MultiHeadAttention(Module):
-    def __init__(self, n_embd: int, n_head: int, causal: bool=True, p_dropout: float=0.1, bias: bool=True, backend: TensorBackend=None):
+    def __init__(self, n_embd: int, n_head: int, causal: bool=True, p_dropout: float=0.1, bias: bool=True, backend: TensorBackend=None, use_fused_kernel: bool=False):
         super().__init__()
         """Implements Multi-Head Attention as described in "Attention Is All You Need"
 
@@ -44,12 +50,15 @@ class MultiHeadAttention(Module):
         self.causal    = causal
         self.attn_hidden_dim = n_embd // n_head
 
+
         ### BEGIN YOUR SOLUTION
+        self.use_fused_kernel = use_fused_kernel
         self.q_projection = Linear(n_embd, n_embd, bias, backend)
         self.k_projection = Linear(n_embd, n_embd, bias, backend)
         self.v_projection = Linear(n_embd, n_embd, bias, backend)
         self.out_projection = Linear(n_embd, n_embd, bias, backend)
         self.dropout = Dropout(p_dropout)
+        
         ### END YOUR SOLUTION
 
     def create_causal_mask(self, bs, nh, seq_len):
@@ -111,11 +120,21 @@ class MultiHeadAttention(Module):
         
         ### BEGIN YOUR SOLUTION
         softmax_input = (q @ kT) / (self.attn_hidden_dim ** 0.5)
+        
         if self.causal:
-            mask = self.create_causal_mask(batch_size, num_head, queries_len)
-            softmax_input += mask
+            mask = self.create_causal_mask(queries_len)
+            if self.use_fused_kernel:
+                result = Attn_Softmax.apply(softmax_input, mask) @ v
+            else:
+                softmax_input += mask
+                result = softmax(softmax_input, dim=3) @ v
+        else:
+            if self.use_fused_kernel:
+                zeros_mask = softmax_input.zeros(softmax_input.shape)
+                result = Attn_Softmax.apply(softmax_input, zeros_mask) @ v
+            else:
+                result = softmax(softmax_input, dim=3) @ v
 
-        result = softmax(softmax_input, dim=3) @ v
         result = result.permute(0, 2, 1, 3).contiguous().view(batch_size, queries_len, num_head * q_dim)
         ### END YOUR SOLUTION
 
@@ -181,7 +200,7 @@ class FeedForward(Module):
     
 
 class TransformerLayer(Module):
-    def __init__(self, n_embd: int, n_head: int, p_dropout: float=0.1, ln_eps: float=1e-5, bias: bool=True, backend: TensorBackend=None):
+    def __init__(self, n_embd: int, n_head: int, p_dropout: float=0.1, ln_eps: float=1e-5, bias: bool=True, backend: TensorBackend=None, use_fused_kernel: bool=False):
         super().__init__()
         """A Transformer Layer in a Pre-LN Transformer.
 
@@ -199,9 +218,10 @@ class TransformerLayer(Module):
             ff : FeedForward layer
         """
         ### BEGIN YOUR SOLUTION
+        self.use_fused_kernel = use_fused_kernel
         self.ln_1 = LayerNorm1d(n_embd, ln_eps, backend)
         self.ln_2 = LayerNorm1d(n_embd, ln_eps, backend)
-        self.attention = MultiHeadAttention(n_embd, n_head, True, p_dropout, bias, backend)
+        self.attention = MultiHeadAttention(n_embd, n_head, True, p_dropout, bias, backend, use_fused_kernel)
         self.ff = FeedForward(n_embd, p_dropout=p_dropout, bias=bias, backend=backend)
         self.drop_out = Dropout(p_dropout)
         ### END YOUR SOLUTION
@@ -217,8 +237,17 @@ class TransformerLayer(Module):
         """
         batch_size, seq_len, n_embd = x.shape
         ### BEGIN YOUR SOLUTION
-        x = x + self.attention(self.ln_1(x.view(batch_size * seq_len, n_embd)).view(batch_size, seq_len, n_embd))
-        return x + self.ff(self.ln_2(x.view(batch_size * seq_len, n_embd)).view(batch_size, seq_len, n_embd))
+        if self.use_fused_kernel:
+            # Use fused LayerNorm
+            x_flat = x.view(batch_size * seq_len, n_embd)
+            norm1 = LayerNorm.apply(x_flat, self.ln_1.weight, self.ln_1.bias).view(batch_size, seq_len, n_embd)
+            x = x + self.attention(norm1)
+            x_flat = x.view(batch_size * seq_len, n_embd)
+            norm2 = LayerNorm.apply(x_flat, self.ln_2.weight, self.ln_2.bias).view(batch_size, seq_len, n_embd)
+            return x + self.ff(norm2)
+        else:
+            x = x + self.attention(self.ln_1(x.view(batch_size * seq_len, n_embd)).view(batch_size, seq_len, n_embd))
+            return x + self.ff(self.ln_2(x.view(batch_size * seq_len, n_embd)).view(batch_size, seq_len, n_embd))
         ### END YOUR SOLUTION
 
 
@@ -232,7 +261,8 @@ class DecoderLM(Module):
         p_dropout: float=0.1,
         ln_eps: float=1e-5, 
         bias: bool=True,
-        backend: TensorBackend=None
+        backend: TensorBackend=None,
+        use_fused_kernel: bool=False
     ):
         super().__init__()
         """A Full Decoder-only Pre-LN Transformer with 4 Transformer Layers.
@@ -261,12 +291,13 @@ class DecoderLM(Module):
         self.n_embd              = n_embd
         self.n_vocab             = n_vocab
         ### BEGIN YOUR SOLUTION
+        self.use_fused_kernel    = use_fused_kernel
         self.token_embeddings    = Embedding(n_vocab, n_embd, backend)
         self.position_embeddings = Embedding(n_positions, n_embd, backend)
-        self.t_layer_1           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
-        self.t_layer_2           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
-        self.t_layer_3           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
-        self.t_layer_4           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
+        self.t_layer_1           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.t_layer_2           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.t_layer_3           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.t_layer_4           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
         self.dropout             = Dropout(p_dropout)
         self.ln                  = LayerNorm1d(n_embd, ln_eps, backend)
         self.lm_head             = Linear(n_embd, n_vocab, bias, backend)
@@ -303,8 +334,10 @@ class DecoderLM(Module):
         x = self.t_layer_3(x)
         x = self.t_layer_4(x)
 
-        # Final LayerNorm
-        x = self.ln(x.view(batch_size * seq_len, self.n_embd))
-        # Get correct shape
-        return self.lm_head(x).view(batch_size, seq_len, self.n_vocab)
+        x_flat = x.view(batch_size * seq_len, self.n_embd)
+        if self.use_fused_kernel:
+            x_norm = LayerNorm.apply(x_flat, self.ln.weight, self.ln.bias)
+        else:
+            x_norm = self.ln(x_flat)
+        return self.lm_head(x_norm).view(batch_size, seq_len, self.n_vocab)
         ### END SOLUTION

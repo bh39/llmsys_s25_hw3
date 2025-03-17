@@ -345,7 +345,8 @@ def main(dataset_name='bbaaaa/iwslt14-de-en-preprocess',
          samples_per_epoch=20000,
          n_vocab=10000,
          n_embd=256,
-         seed=11111):
+         seed=11111,
+         use_fused_kernel=False):
     """
     The main function to train and evaluate the model on a specified dataset.
 
@@ -377,7 +378,8 @@ def main(dataset_name='bbaaaa/iwslt14-de-en-preprocess',
         # 'n_layer'     : 4,    # n_layer
         'p_dropout': 0.1,  # x_pdrop
         'ln_eps': 1e-5,  # layer_norm_epsilon
-        'backend': backend
+        'backend': backend,
+        'use_fused_kernel': use_fused_kernel
     }
 
     model = DecoderLM(**config)
