@@ -55,17 +55,15 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
     l2_sum += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
   }
 
-  float combined_sum[2];
-  combined_sum[0] = l_sum;
-  combined_sum[1] = l2_sum;
-
   // Step 2: 
-  blockReduce<ReduceType::kSum, 2>(combined_sum);
+  blockReduce<ReduceType::kSum, 1>(l_sum);
+  __syncthreads();
+  blockReduce<ReduceType::kSum, 1>(l2_sum);
   
   __shared__ float s_mean, s_variance;
   if (threadIdx.x == 0) {
-    s_mean = combined_sum[0] / (hidden_size * 4);
-    s_variance = combined_sum[1] / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
+    s_mean = l_sum / (hidden_size * 4);
+    s_variance = l2_sum / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
     
     vars[blockIdx.x] = s_variance;
     if (means != nullptr) {
@@ -208,7 +206,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   //      -> https://developer.nvidia.com/blog/cooperative-groups/#:~:text=Using%20thread_block_tile%3A%3Ashfl_down()%20to%20simplify%20our%20warp%2Dlevel%20reduction%20does%20benefit%20our%20code%3A%20it%20simplifies%20it%20and%20eliminates%20the%20need%20for%20shared%20memory
   //      -> The highlighted line gives you a conceptual understanding of what the g.shfl_down is doing. Usually, the threads inside a block need to load everything to shared memory and work together to reduce the result (like what you have implemented in the hw1 for reduce function). 
   //      -> Now g.shfl_down helps you do so without consuming any shared memory. g.shfl_down makes it more efficient.
-  // 4. Assign the final result to the correct position in the global output
+  // 4. Assign the final result to the correct thread_idxition in the global output
 
   __shared__ float betta_buffer[TILE_DIM][TILE_DIM];
   __shared__ float gamma_buffer[TILE_DIM][TILE_DIM];
@@ -220,7 +218,6 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   float dbetta = 0.0f;
   float dgamma = 0.0f;
 
-  // process rows
   if (thread_idx < width) {
     for (int i = threadIdx.y; i < rows; i += TILE_DIM) {
       int idx = i * width + thread_idx;
@@ -246,19 +243,19 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   
   __syncthreads();
 
-  // Step 3: transpose to get values for the same column together for shuffle
-  float buffer_dbetta = betta_buffer[threadIdx.y][threadIdx.x];
-  float buffer_dgamma = gamma_buffer[threadIdx.y][threadIdx.x];
+  // Step 3: transthread_idxe to get values for the same column together for shuffle
+  float betta_val = betta_buffer[threadIdx.y][threadIdx.x];
+  float gamma_val = gamma_buffer[threadIdx.y][threadIdx.x];
   
   // shfl_down to reduce
   for (int i = 1; i < TILE_DIM; i *= 2) {
-    buffer_dbetta += g.shfl_down(buffer_dbetta, i);
-    buffer_dgamma += g.shfl_down(buffer_dgamma, i);
+    betta_val += g.shfl_down(betta_val, i);
+    gamma_val += g.shfl_down(gamma_val, i);
   }
   // Step 4:
   if (threadIdx.x == 0 && thread_idx < width) {
-    betta_grad[blockIdx.x * blockDim.x + threadIdx.y] = buffer_dbetta;
-    gamma_grad[blockIdx.x * blockDim.x + threadIdx.y] = buffer_dgamma;
+    betta_grad[blockIdx.x * blockDim.x + threadIdx.y] = betta_val;
+    gamma_grad[blockIdx.x * blockDim.x + threadIdx.y] = gamma_val;
   }
   
   /// END ASSIGN3_2
@@ -308,7 +305,7 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // 4. Compute final gradient
 
   // Step 1: 
-  int pos = blockIdx.x * hidden_dim + threadIdx.x;
+  int thread_idx = blockIdx.x * hidden_dim + threadIdx.x;
   if (threadIdx.x >= hidden_dim) {
     return;
   }
@@ -319,8 +316,7 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
   const float4 *betta_f4 = (betta != nullptr) ? reinterpret_cast<const float4 *>(betta) : nullptr;
   
-  // Step 1: 
-  float4 dxhat = out_grad_f4[pos];
+  float4 dxhat = out_grad_f4[thread_idx];
   float4 gamma_val = gamma_f4[threadIdx.x];
 
   dxhat.x *= gamma_val.x;
@@ -329,7 +325,7 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   dxhat.w *= gamma_val.w;
   
   // Step 2: 
-  float4 xhat = inp_f4[pos];
+  float4 xhat = inp_f4[thread_idx];
   float inv_std = rsqrtf(vars[blockIdx.x]);
   
   if (means != nullptr) {
@@ -349,19 +345,22 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   }
   
   // Step 3: 
-  float combined_sum[2];
-  combined_sum[0] = dxhat.x + dxhat.y + dxhat.z + dxhat.w;
-  combined_sum[1] = dxhat.x * xhat.x + dxhat.y * xhat.y + 
+  float l_dxhat_sum, l_dxhat_xhat_sum;
+  l_dxhat_sum = dxhat.x + dxhat.y + dxhat.z + dxhat.w;
+  l_dxhat_xhat_sum[1] = dxhat.x * xhat.x + dxhat.y * xhat.y + 
                  dxhat.z * xhat.z + dxhat.w * xhat.w;
   
-  // combined block reduction according to edstem
-  blockReduce<ReduceType::kSum, 2>(combined_sum);
+  // sync blockReduce according to edstem
+  blockReduce<ReduceType::kSum, 1>(l_dxhat_sum);
+  __syncthreads();
+  blockReduce<ReduceType::kSum, 1>(l_dxhat_xhat_sum);
+  __syncthreads();
   
   __shared__ float s_dxhat_sum, s_dxhat_xhat_sum;
   if (threadIdx.x == 0) {
     float scale = 1.0f / (hidden_dim * 4);
-    s_dxhat_sum = combined_sum[0] * scale;
-    s_dxhat_xhat_sum = combined_sum[1] * scale;
+    s_dxhat_sum = l_dxhat_sum[0] * scale;
+    s_dxhat_xhat_sum = l_dxhat_xhat_sum[1] * scale;
   }
   __syncthreads();
   
@@ -371,7 +370,7 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   dxhat.z = (dxhat.z - s_dxhat_sum - xhat.z * s_dxhat_xhat_sum) * inv_std;
   dxhat.w = (dxhat.w - s_dxhat_sum - xhat.w * s_dxhat_xhat_sum) * inv_std;
   
-  inp_grad_f4[pos] = dxhat;
+  inp_grad_f4[thread_idx] = dxhat;
 
   /// END ASSIGN3_2
 }
