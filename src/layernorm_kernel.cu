@@ -347,13 +347,13 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // Step 3: 
   float l_dxhat_sum, l_dxhat_xhat_sum;
   l_dxhat_sum = dxhat.x + dxhat.y + dxhat.z + dxhat.w;
-  l_dxhat_xhat_sum[1] = dxhat.x * xhat.x + dxhat.y * xhat.y + 
+  l_dxhat_xhat_sum = dxhat.x * xhat.x + dxhat.y * xhat.y + 
                  dxhat.z * xhat.z + dxhat.w * xhat.w;
   
   // sync blockReduce according to edstem
-  blockReduce<ReduceType::kSum, 1>(l_dxhat_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_dxhat_sum);
   __syncthreads();
-  blockReduce<ReduceType::kSum, 1>(l_dxhat_xhat_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_dxhat_xhat_sum);
   __syncthreads();
   
   __shared__ float s_dxhat_sum, s_dxhat_xhat_sum;
