@@ -45,23 +45,22 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   // 3. Compute layernorm result with reinterpret_cast by casting to float4 for speedup
   
   // Step 1: 
-  float l_sum = 0;
-  float l_square_sum = 0;
+  float combined_sum[2];
+
   float4 *inp_f4 = reinterpret_cast<float4 *>(inp) + blockIdx.x * hidden_size;  
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val = inp_f4[idx];
-    l_sum += val.x + val.y + val.z + val.w;
-    l_square_sum += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
+    combined_sum[0] += val.x + val.y + val.z + val.w;
+    combined_sum[1] += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
   }
 
   // Step 2: 
-  blockReduce<ReduceType::kSum, 1>(&l_sum);
-  blockReduce<ReduceType::kSum, 1>(&l_square_sum);
+  blockReduce<ReduceType::kSum, 2>(combined_sum);
   
   __shared__ float s_mean, s_variance;
   if (threadIdx.x == 0) {
-    s_mean = l_sum / (hidden_size * 4);
-    s_variance = l_square_sum / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
+    s_mean = combined_sum[0] / (hidden_size * 4);
+    s_variance = combined_sum[1] / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
     
     vars[blockIdx.x] = s_variance;
     if (means != nullptr) {
