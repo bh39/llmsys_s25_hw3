@@ -56,9 +56,9 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   }
 
   // Step 2: 
-  blockReduce<ReduceType::kSum, 1>(l_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_sum);
   __syncthreads();
-  blockReduce<ReduceType::kSum, 1>(l2_sum);
+  blockReduce<ReduceType::kSum, 1>(&l2_sum);
   
   __shared__ float s_mean, s_variance;
   if (threadIdx.x == 0) {
@@ -359,8 +359,8 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   __shared__ float s_dxhat_sum, s_dxhat_xhat_sum;
   if (threadIdx.x == 0) {
     float scale = 1.0f / (hidden_dim * 4);
-    s_dxhat_sum = l_dxhat_sum[0] * scale;
-    s_dxhat_xhat_sum = l_dxhat_xhat_sum[1] * scale;
+    s_dxhat_sum = l_dxhat_sum * scale;
+    s_dxhat_xhat_sum = l_dxhat_xhat_sum * scale;
   }
   __syncthreads();
   
